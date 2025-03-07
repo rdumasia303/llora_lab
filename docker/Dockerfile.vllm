@@ -1,0 +1,32 @@
+FROM nvcr.io/nvidia/pytorch:24.11-py3
+
+# Environment setup
+ENV HF_HOME=/huggingface-cache
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PYTHONUNBUFFERED=1
+
+# Create directories
+RUN mkdir -p /huggingface-cache /adapters /logs
+
+# Install dependencies
+RUN pip uninstall -y pynvml
+COPY requirements/common.txt /tmp/common.txt
+COPY requirements/serve.txt /tmp/serve.txt
+RUN pip install -r /tmp/common.txt -r /tmp/serve.txt
+
+
+RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+RUN pip install --upgrade flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+# Install Flash Attention to support newer models
+#RUN pip install --no-cache-dir "flash-attn>=2.6.3" --extra-index-url https://download.pytorch.org/whl/cu12
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose the server port
+EXPOSE 8000
+
+# Default command - will be overridden by the admin container
+CMD ["echo", "This container should be started by the admin service"]
+

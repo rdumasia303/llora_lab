@@ -1,0 +1,11 @@
+name = "mistral-7b"
+description = "Mistral 7B Instruct v0.2"
+model_id = "mistralai/Mistral-7B-Instruct-v0.2"
+quantization = "bitsandbytes"
+load_format = "bitsandbytes"
+max_model_len = 8192
+gpu_memory_utilization = 0.99
+
+[additional_params]
+chat_template = "mistral"
+response_role = "assistant"

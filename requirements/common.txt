@@ -1,0 +1,11 @@
+torch>=2.4.0
+transformers>=4.39.0
+accelerate>=0.31.0
+huggingface-hub>=0.20.0
+safetensors>=0.4.2
+datasets>=2.17.0
+numpy>=1.26.0
+pydantic>=2.5.0
+tqdm>=4.66.0
+sentencepiece>=0.1.99
+einops>=0.7.0

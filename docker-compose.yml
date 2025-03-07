@@ -1,0 +1,123 @@
+# Define common GPU config
+x-gpu-config: &gpu-config
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            capabilities: [gpu]
+  ipc: host
+  ulimits:
+    memlock:
+      soft: -1
+      hard: -1
+    stack:
+      soft: 67108864
+      hard: 67108864
+
+services:
+  # Admin API service - core orchestration
+  admin-api:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    privileged: true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./configs:/app/configs
+      - ./datasets:/app/datasets
+      - ./adapters:/app/adapters:shared
+      - ./logs:/app/logs
+      - ./huggingface-cache:/app/huggingface-cache:shared
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - HF_HOME=/huggingface-cache
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - NVIDIA_VISIBLE_DEVICES=all
+    networks:
+      - llora-lab-network
+    restart: unless-stopped
+
+  # Admin UI - React frontend with Nginx
+  admin-ui:
+    image: nginx:alpine
+    ports:
+      - "3001:80"
+    volumes:
+      - ./admin-ui/dist:/usr/share/nginx/html
+      - ./admin-ui/nginx.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - llora-lab-network
+    restart: unless-stopped
+    depends_on:
+      - admin-api
+
+  # Pre-built trainer image - started on demand by admin-api
+  trainer:
+    image: llora-lab-trainer
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.trainer
+      args:
+        - CUDA_VERSION=${CUDA_VERSION:-124}
+    profiles: ["manual"]  # Not started by default
+    <<: *gpu-config
+    volumes:
+      - ./huggingface-cache:/huggingface-cache
+      - ./datasets:/workspace/training
+      - ./adapters:/workspace/adapters
+      - ./logs:/workspace/logs
+    environment:
+      - HF_HOME=/huggingface-cache
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN}
+    networks:
+      - llora-lab-network
+
+  # Pre-built vLLM server image - started on demand by admin-api
+  vllm:
+    image: llora-lab-vllm
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vllm
+    profiles: ["manual"]  # Not started by default
+    <<: *gpu-config
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./huggingface-cache:/huggingface-cache
+      - ./adapters:/adapters
+      - ./logs:/logs
+    environment:
+      - HF_HOME=/huggingface-cache
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN}
+    networks:
+      - llora-lab-network
+    container_name: llora-lab-vllm
+
+  # Open WebUI container - started on demand by admin-api
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    profiles: ["manual"]  # Not started by default
+    ports:
+      - "3000:8080"
+    volumes:
+      - webui-data:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=http://llora-lab-vllm:8000/v1
+    networks:
+      - llora-lab-network
+    container_name: llora-lab-webui
+
+networks:
+  llora-lab-network:
+    driver: bridge
+    name: llora-lab-network
+
+volumes:
+  webui-data:

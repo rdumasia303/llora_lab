@@ -1,0 +1,13 @@
+name = "deepseek distil 32b"
+description = "Deepseek Distil of qwen 32b"
+model_id = "casperhansen/deepseek-r1-distill-qwen-32b-awq"
+quantization = "awq"
+load_format = "auto"
+dtype = "half"
+max_model_len = 6000
+max_num_seqs = 256
+gpu_memory_utilization = 0.99
+enforce_eager = true
+trust_remote_code = false
+
+[additional_params]

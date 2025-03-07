@@ -1,0 +1,10 @@
+vllm==0.6.4.post1
+xformers>=0.0.23
+optimum>=1.17.0
+#fastapi>=0.105.0
+#uvicorn>=0.24.0.post1
+ray>=2.9.0
+openai>=1.9.0
+prometheus-client>=0.18.0
+bitsandbytes>=0.43.0
+nvidia-ml-py

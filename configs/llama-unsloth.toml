@@ -1,0 +1,18 @@
+# Model Configuration for Llama 3.1 8B
+model_id = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
+description = "Meta Llama 3.1 8B Instruct (unsloth 4bit)"
+
+# Quantization settings
+quantization = "bitsandbytes"
+load_format = "bitsandbytes"
+
+# Model dimensions
+max_model_len = 6000
+
+# Performance settings
+gpu_memory_utilization = 0.99
+enforce_eager = false
+
+# Additional parameters
+[additional_params]
+

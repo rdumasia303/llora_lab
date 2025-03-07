@@ -1,0 +1,12 @@
+name = "llama-3.1-vision"
+description = "Meta Llama 3.1 8B Vision"
+model_id = "meta-llama/Llama-3.1-8B-Vision"
+quantization = "bitsandbytes"
+load_format = "bitsandbytes"
+max_model_len = 4096
+enforce_eager = true
+gpu_memory_utilization = 0.9
+
+[additional_params]
+chat_template = "llama-3.1"
+response_role = "assistant"

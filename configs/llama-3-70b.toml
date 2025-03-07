@@ -1,0 +1,11 @@
+name = "llama-3-70b"
+description = "Meta Llama 3 70B Instruct"
+model_id = "meta-llama/Llama-3-70B-Instruct"
+quantization = "bitsandbytes"
+load_format = "bitsandbytes"
+max_model_len = 4096
+gpu_memory_utilization = 0.99
+
+[additional_params]
+chat_template = "llama-3"
+response_role = "assistant"

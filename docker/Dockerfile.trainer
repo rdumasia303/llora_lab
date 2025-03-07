@@ -1,0 +1,32 @@
+FROM nvcr.io/nvidia/pytorch:25.02-py3
+
+# Environment setup
+ENV HF_HOME=/huggingface-cache
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PYTHONUNBUFFERED=1
+
+# Create directories
+WORKDIR /workspace
+RUN mkdir -p /huggingface-cache /workspace/adapters /workspace/training /workspace/logs
+
+# Install dependencies
+COPY requirements/common.txt /tmp/common.txt
+COPY requirements/train.txt /tmp/train.txt
+RUN pip install -r /tmp/common.txt -r /tmp/train.txt
+
+# Install Unsloth with appropriate CUDA version
+ARG CUDA_VERSION=128
+RUN pip install "unsloth[cu${CUDA_VERSION}-torch250] @ git+https://github.com/unslothai/unsloth.git"
+
+# Copy training scripts
+COPY scripts/train.py /workspace/
+COPY scripts/test_adapter.py /workspace/
+COPY scripts/utils/ /workspace/utils/
+
+# Install jupyter for development/debugging
+RUN pip install jupyterlab
+EXPOSE 8888
+
+# Set default command
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--allow-root", "--no-browser"]
+

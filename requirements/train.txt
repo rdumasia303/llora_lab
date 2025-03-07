@@ -1,0 +1,9 @@
+bitsandbytes>=0.43.0
+trl>=0.8.0
+peft>=0.9.0
+wandb>=0.16.0
+evaluate>=0.4.0
+tensorboard>=2.15.0
+psutil>=5.9.0
+matplotlib>=3.7.0
+pandas>=2.0.0
