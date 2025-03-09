@@ -10,17 +10,21 @@ WORKDIR /workspace
 RUN mkdir -p /huggingface-cache /workspace/adapters /workspace/training /workspace/logs
 
 # Install dependencies
-COPY requirements/common.txt /tmp/common.txt
 COPY requirements/train.txt /tmp/train.txt
-RUN pip install -r /tmp/common.txt -r /tmp/train.txt
+RUN pip install -r /tmp/train.txt
 
 # Install Unsloth with appropriate CUDA version
-ARG CUDA_VERSION=128
-RUN pip install "unsloth[cu${CUDA_VERSION}-torch250] @ git+https://github.com/unslothai/unsloth.git"
+# This is all basically a bit of a mess because python dependency resolution is a nightmare
+ARG CUDA_VERSION=124
+#RUN pip install "unsloth[cu${CUDA_VERSION}-torch250] @ git+https://github.com/unslothai/unsloth.git"
+RUN pip install unsloth
+RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+RUN pip install --upgrade flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+RUN pip uninstall trl -y && pip install --no-cache-dir --force-reinstall --no-deps "trl<0.15.0"
 
 # Copy training scripts
-COPY scripts/train.py /workspace/
-COPY scripts/test_adapter.py /workspace/
+COPY scripts/train2.py /workspace/
+#COPY scripts/test_adapter.py /workspace/
 COPY scripts/utils/ /workspace/utils/
 
 # Install jupyter for development/debugging

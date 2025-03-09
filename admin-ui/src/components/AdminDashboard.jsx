@@ -71,6 +71,7 @@ const AdminDashboard = () => {
     memory_usage: []
   });
   const [systemLoading, setSystemLoading] = useState(false);
+  const [trainingTab, setTrainingTab] = useState('list');
   
   // Form options
   const [quantizationOptions, setQuantizationOptions] = useState([
@@ -134,6 +135,8 @@ const AdminDashboard = () => {
     response_role: "",
     additional_params: {}
   });
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editingModelName, setEditingModelName] = useState("");
   
   // New adapter form state
   const [newAdapter, setNewAdapter] = useState({
@@ -154,6 +157,7 @@ const AdminDashboard = () => {
   });
   
   const [uploadFile, setUploadFile] = useState(null);
+  
   
   // Serving state
   const [servingConfig, setServingConfig] = useState({
@@ -212,9 +216,13 @@ const AdminDashboard = () => {
     setLoading(prev => ({ ...prev, datasets: true }));
     try {
       const data = await fetchAPI('/datasets');
-      setDatasets(data);
+      console.log("Fetched datasets:", data); // Debug log
+      setDatasets(data || []);
     } catch (error) {
       console.error("Error fetching datasets:", error);
+      setError(`Failed to load datasets: ${error.message}`);
+      // Set empty array to prevent UI errors
+      setDatasets([]);
     } finally {
       setLoading(prev => ({ ...prev, datasets: false }));
     }
@@ -224,13 +232,36 @@ const AdminDashboard = () => {
     setLoading(prev => ({ ...prev, jobs: true }));
     try {
       // Fetch both training and serving jobs
-      const trainingJobs = await fetchAPI('/training/jobs');
-      const servingJobs = await fetchAPI('/serving/jobs');
+      console.log("Fetching training and serving jobs..."); // Debug log
       
-      setTrainingJobs(trainingJobs);
-      setServingJobs(servingJobs);
+      // Make separate requests to help with debugging
+      let trainingData = [];
+      let servingData = [];
+      
+      try {
+        trainingData = await fetchAPI('/training/jobs');
+        console.log("Training jobs response:", trainingData); // Debug log
+      } catch (trainingError) {
+        console.error("Error fetching training jobs:", trainingError);
+        setError(`Training jobs error: ${trainingError.message}`);
+      }
+      
+      try {
+        servingData = await fetchAPI('/serving/jobs');
+        console.log("Serving jobs response:", servingData); // Debug log
+      } catch (servingError) {
+        console.error("Error fetching serving jobs:", servingError);
+        setError(`Serving jobs error: ${servingError.message}`);
+      }
+      
+      // Update state with whatever data we successfully retrieved
+      setTrainingJobs(trainingData || []);
+      setServingJobs(servingData || []);
     } catch (error) {
-      console.error("Error fetching jobs:", error);
+      console.error("Error in overall jobs fetch:", error);
+      // Initialize with empty arrays to prevent UI errors
+      setTrainingJobs([]);
+      setServingJobs([]);
     } finally {
       setLoading(prev => ({ ...prev, jobs: false }));
     }
@@ -287,21 +318,30 @@ const AdminDashboard = () => {
     if (!jobId) return;
     
     setLoading(prev => ({ ...prev, logs: true }));
-
+  
     try {
       const endpoint = jobType === 'training' 
         ? `/training/logs/${jobId}`
         : `/serving/logs/${jobId}`;
         
       const data = await fetchAPI(endpoint);
-      setLogContent(data.logs || "No logs available");
+      
+      // Only update if we got actual logs (prevent flickering with empty responses)
+      if (data.logs && data.logs.trim() !== "") {
+        setLogContent(data.logs);
+      } else if (!logContent) {
+        // Only set "no logs" message if there's currently no content
+        setLogContent("Waiting for logs...");
+      }
     } catch (error) {
       console.error("Error fetching logs:", error);
-      setLogContent("Error fetching logs: " + error.message);
+      if (!logContent) {
+        setLogContent("Error fetching logs: " + error.message);
+      }
     } finally {
       setLoading(prev => ({ ...prev, logs: false }));
     }
-  }, [fetchAPI]);
+  }, [fetchAPI, logContent]);
 
   // Clear all refresh intervals to prevent memory leaks
   const clearAllIntervals = useCallback(() => {
@@ -338,27 +378,47 @@ const AdminDashboard = () => {
     // Initial data loads based on current tab
     const loadInitialData = async () => {
       try {
-        // Common data needed across tabs
-        if (['overview', 'models', 'adapters', 'datasets', 'training', 'serving'].includes(activeTab)) {
-          await Promise.all([
-            activeTab === 'overview' || activeTab === 'models' ? fetchModels() : Promise.resolve(),
-            activeTab === 'overview' || activeTab === 'adapters' ? fetchAdapters() : Promise.resolve(),
-            activeTab === 'overview' || activeTab === 'datasets' ? fetchDatasets() : Promise.resolve(),
-            ['overview', 'training', 'serving'].includes(activeTab) ? fetchJobs() : Promise.resolve(),
-            activeTab === 'overview' ? fetchSystemStats() : Promise.resolve(),
-            activeTab === 'overview' ? fetchSystemMetrics() : Promise.resolve()
-          ]);
+        // Ensure loading states are properly set
+        if (activeTab === 'datasets') {
+          setLoading(prev => ({ ...prev, datasets: true }));
+        } else if (activeTab === 'training') {
+          setLoading(prev => ({ ...prev, jobs: true }));
         }
         
-        // For logs tab
-        if (activeTab === 'logs' && selectedJobLogs) {
+        // Load appropriate data for each tab
+        if (activeTab === 'overview') {
+          await Promise.all([
+            fetchModels(),
+            fetchAdapters(), 
+            fetchDatasets(),
+            fetchJobs(),
+            fetchSystemStats(),
+            fetchSystemMetrics()
+          ]);
+        } else if (activeTab === 'models') {
+          await fetchModels();
+        } else if (activeTab === 'adapters') {
+          await fetchAdapters();
+        } else if (activeTab === 'datasets') {
+          await fetchDatasets();
+        } else if (activeTab === 'training' || activeTab === 'serving') {
+          await fetchJobs();
+        } else if (activeTab === 'logs' && selectedJobLogs) {
           await fetchLogs(selectedJobLogs.id, selectedJobLogs.type);
         }
       } catch (error) {
         console.error("Error loading initial data:", error);
+        setError(`Failed to load data: ${error.message}`);
+      } finally {
+        // Reset loading states
+        if (activeTab === 'datasets') {
+          setLoading(prev => ({ ...prev, datasets: false }));
+        } else if (activeTab === 'training') {
+          setLoading(prev => ({ ...prev, jobs: false }));
+        }
       }
     };
-
+  
     loadInitialData();
     
     // Setup appropriate intervals based on active tab
@@ -369,32 +429,90 @@ const AdminDashboard = () => {
     } else if (activeTab === 'training' || activeTab === 'serving') {
       setupInterval('jobs', fetchJobs, 3000);
     } else if (activeTab === 'logs' && selectedJobLogs) {
-      setupInterval('logs', () => fetchLogs(selectedJobLogs.id, selectedJobLogs.type), 5000);
+      setupInterval('logs', () => fetchLogs(selectedJobLogs.id, selectedJobLogs.type), 2000);
+    } else if (activeTab === 'datasets') {
+      // Add periodic refresh for datasets
+      setupInterval('datasets', fetchDatasets, 10000);
     }
+    
     
     // Clean up all intervals on component unmount
     return clearAllIntervals;
   }, [activeTab, selectedJobLogs, fetchModels, fetchAdapters, fetchDatasets, fetchJobs, 
       fetchSystemStats, fetchSystemMetrics, fetchLogs, clearAllIntervals, setupInterval]);
+  
 
-  // API Actions
-  const createModel = async () => {
+  // Add function to load model details for editing
+  const editModel = async (modelName) => {
+    try {
+      setLoading(prev => ({ ...prev, models: true }));
+      
+      // Fetch the specific model configuration
+      const modelConfig = await fetchAPI(`/configs/models/${modelName}`);
+      
+      // Set the form values with the current configuration
+      setNewModel({
+        name: modelConfig.name,
+        description: modelConfig.description || "",
+        model_id: modelConfig.model_id,
+        quantization: modelConfig.quantization || "",
+        load_format: modelConfig.load_format || "",
+        dtype: modelConfig.dtype || "",
+        max_model_len: modelConfig.max_model_len,
+        max_num_seqs: modelConfig.max_num_seqs,
+        gpu_memory_utilization: modelConfig.gpu_memory_utilization,
+        tensor_parallel_size: modelConfig.tensor_parallel_size,
+        enforce_eager: modelConfig.enforce_eager || false,
+        trust_remote_code: modelConfig.trust_remote_code || false,
+        chat_template: modelConfig.chat_template || "",
+        response_role: modelConfig.response_role || "",
+        additional_params: modelConfig.additional_params || {}
+      });
+      
+      // Set edit mode and store the model name being edited
+      setIsEditMode(true);
+      setEditingModelName(modelName);
+      setShowModelDialog(true);
+    } catch (error) {
+      console.error("Error loading model for editing:", error);
+      setError(`Failed to load model: ${error.message}`);
+    } finally {
+      setLoading(prev => ({ ...prev, models: false }));
+    }
+  };
+
+  const saveModel = async () => {
     try {
       // Remove any null/undefined values for clean API request
       const modelData = Object.fromEntries(
         Object.entries(newModel).filter(([_, v]) => v !== null && v !== undefined && v !== "")
       );
       
-      await fetchAPI('/configs/models', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(modelData)
-      });
+      if (isEditMode) {
+        // Update existing model
+        await fetchAPI(`/configs/models/${editingModelName}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(modelData)
+        });
+      } else {
+        // Create new model
+        await fetchAPI('/configs/models', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(modelData)
+        });
+      }
       
+      // Reset form and state
       fetchModels();
       setShowModelDialog(false);
+      setIsEditMode(false);
+      setEditingModelName("");
       setNewModel({
         name: "",
         description: "",
@@ -413,10 +531,11 @@ const AdminDashboard = () => {
         additional_params: {}
       });
     } catch (error) {
-      console.error("Error creating model:", error);
+      console.error(`Error ${isEditMode ? 'updating' : 'creating'} model:`, error);
+      setError(`Failed to ${isEditMode ? 'update' : 'create'} model: ${error.message}`);
     }
   };
-  
+
   const deleteModel = async (name) => {
     try {
       await fetchAPI(`/configs/models/${name}`, {
@@ -576,15 +695,44 @@ const AdminDashboard = () => {
 
     try {
       const url = `/serving/start?model_name=${servingConfig.model}${servingConfig.adapter ? `&adapter=${servingConfig.adapter}` : ''}`;
-      await fetchAPI(url, {
+      const response = await fetchAPI(url, {
         method: 'POST'
       });
 
-      setLogContent(""); 
+      // Clear existing log content
+      setLogContent("Starting model serving...\nInitializing container...");
       
-      fetchJobs();
+      // Set up automatic log fetching - wait briefly for container to start
+      setTimeout(async () => {
+        // Fetch jobs to get the ID of the new serving job
+        await fetchJobs();
+        // Find the newest serving job
+        const servingJobs = await fetchAPI('/serving/jobs');
+        const newestJob = servingJobs.sort((a, b) => 
+          new Date(b.start_time) - new Date(a.start_time)
+        )[0];
+        
+        if (newestJob) {
+          // Set this as the selected job for logs
+          setSelectedJobLogs({
+            id: newestJob.id,
+            type: 'serving'
+          });
+          
+          // Fetch logs immediately
+          await fetchLogs(newestJob.id, 'serving');
+          
+          // Set up more frequent refreshing for new jobs
+          clearAllIntervals();
+          setupInterval('logs', () => fetchLogs(newestJob.id, 'serving'), 2000); // More frequent updates
+        }
+      }, 1000);
+      
     } catch (error) {
       console.error("Error starting serving:", error);
+      setError(`Failed to start serving: ${error.message}`);
+    } finally {
+      setLoading(prev => ({ ...prev, jobs: false }));
     }
   };
   
@@ -677,7 +825,7 @@ const AdminDashboard = () => {
       };
     });
   };
-  
+
   return (
     <div className="flex flex-col min-h-screen bg-gray-900 text-gray-200">
       {/* Header */}
@@ -865,8 +1013,10 @@ const AdminDashboard = () => {
                       <div className="mt-4">
                         <button 
                           onClick={() => {
-                            setActiveTab('adapters');
-                            setAdaptersTab('create');
+                            setActiveTab('training');
+                            //setAdaptersTab('create');
+                            // Navigate to training tab and trigger new training job dialog
+                            setTrainingTab && setTrainingTab('new');
                           }}
                           className="bg-purple-700 hover:bg-purple-600 text-white px-3 py-1 rounded text-sm"
                         >
@@ -1042,6 +1192,605 @@ const AdminDashboard = () => {
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeTab === 'adapters' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold">Adapters</h2>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => setAdaptersTab('list')}
+                    className={`px-3 py-1 rounded text-sm ${adaptersTab === 'list' ? 'bg-purple-700 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  >
+                    Adapter List
+                  </button>
+                  <button
+                    onClick={() => setAdaptersTab('create')}
+                    className={`px-3 py-1 rounded text-sm ${adaptersTab === 'create' ? 'bg-purple-700 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  >
+                    Create Adapter
+                  </button>
+                  <button
+                    onClick={() => {
+                      // Make sure datasets are loaded before showing test interface
+                      fetchDatasets();
+                      fetchModels();
+                      fetchAdapters();
+                      setAdaptersTab('test');
+                    }}
+                    className={`px-3 py-1 rounded text-sm ${adaptersTab === 'test' ? 'bg-purple-700 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  >
+                    Test Adapter
+                  </button>
+                </div>
+              </div>
+              
+              {/* Adapter list tab */}
+              {adaptersTab === 'list' && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                  <h3 className="p-4 border-b border-gray-700 text-lg font-semibold">Available Adapters</h3>
+                  
+                  {loading.adapters ? (
+                    <div className="p-6 text-center">
+                      <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-4 text-purple-500" />
+                      <p>Loading adapters...</p>
+                    </div>
+                  ) : adapters.length === 0 ? (
+                    <div className="p-8 text-center">
+                      <Info size={36} className="mx-auto mb-2 text-gray-400" />
+                      <p className="text-gray-400 mb-4">No adapters available</p>
+                      <button 
+                        onClick={() => setAdaptersTab('create')}
+                        className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded"
+                      >
+                        Create Your First Adapter
+                      </button>
+                    </div>
+                  ) : (
+                    <table className="min-w-full divide-y divide-gray-700">
+                      <thead className="bg-gray-700">
+                        <tr>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Name</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Base Model</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Size</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Created</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-700">
+                        {adapters.map(adapter => (
+                          <tr key={adapter.name} className="hover:bg-gray-750">
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="text-sm font-medium">{adapter.name}</div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {adapter.base_model || 'Unknown'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {formatFileSize(adapter.size)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {formatTimestamp(adapter.created)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                              <button 
+                                onClick={() => {
+                                  setServingConfig({
+                                    model: adapter.base_model || "",
+                                    adapter: adapter.name
+                                  });
+                                  setActiveTab('serving');
+                                }}
+                                className="text-blue-400 hover:text-blue-300 mr-3"
+                              >
+                                Deploy
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedAdapter(adapter.name);
+                                  setAdaptersTab('test');
+                                }}
+                                className="text-purple-400 hover:text-purple-300 mr-3"
+                              >
+                                Test
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setConfirmAction(() => () => deleteAdapter(adapter.name));
+                                  setConfirmMessage(`Delete adapter "${adapter.name}"?`);
+                                  setShowConfirmDialog(true);
+                                }}
+                                className="text-red-400 hover:text-red-300"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+              
+              {/* Create adapter tab */}
+              {adaptersTab === 'create' && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                  <h3 className="text-lg font-semibold mb-4">Create New Adapter</h3>
+                  
+                  <div className="grid grid-cols-2 gap-4 mb-6">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Name</label>
+                      <input 
+                        type="text" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.name}
+                        onChange={(e) => setNewAdapter({...newAdapter, name: e.target.value})}
+                        placeholder="e.g., my-custom-lora"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Base Model</label>
+                      <select
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.base_model}
+                        onChange={(e) => setNewAdapter({...newAdapter, base_model: e.target.value})}
+                      >
+                        <option value="">Select a model</option>
+                        {models.map(model => (
+                          <option key={model.name} value={model.name}>{model.name}</option>
+                        ))}
+                      </select>
+                      {models.length === 0 && (
+                        <p className="text-xs text-yellow-400 mt-1">
+                          No models available. Please add a model first.
+                        </p>
+                      )}
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Dataset</label>
+                      <select
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.dataset}
+                        onChange={(e) => setNewAdapter({...newAdapter, dataset: e.target.value})}
+                      >
+                        <option value="">Select a dataset</option>
+                        {datasets.map(dataset => (
+                          <option key={dataset.name} value={dataset.name}>{dataset.name}</option>
+                        ))}
+                      </select>
+                      {datasets.length === 0 && (
+                        <p className="text-xs text-yellow-400 mt-1">
+                          No datasets available. Please upload a dataset first.
+                        </p>
+                      )}
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Description</label>
+                      <input 
+                        type="text" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.description || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, description: e.target.value})}
+                        placeholder="Optional description"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">LoRA Rank</label>
+                      <input 
+                        type="number" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.lora_rank || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, lora_rank: e.target.value ? parseInt(e.target.value) : null})}
+                        placeholder="e.g., 8"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">LoRA Alpha</label>
+                      <input 
+                        type="number" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.lora_alpha || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, lora_alpha: e.target.value ? parseInt(e.target.value) : null})}
+                        placeholder="e.g., 16"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">LoRA Dropout</label>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.lora_dropout || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, lora_dropout: e.target.value ? parseFloat(e.target.value) : null})}
+                        placeholder="e.g., 0.05"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Training Steps</label>
+                      <input 
+                        type="number" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.steps || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, steps: e.target.value ? parseInt(e.target.value) : null})}
+                        placeholder="e.g., 100"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Batch Size</label>
+                      <input 
+                        type="number" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.batch_size || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, batch_size: e.target.value ? parseInt(e.target.value) : null})}
+                        placeholder="e.g., 8"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Learning Rate</label>
+                      <input 
+                        type="number" 
+                        step="0.0001"
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.learning_rate || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, learning_rate: e.target.value ? parseFloat(e.target.value) : null})}
+                        placeholder="e.g., 0.0002"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Max Sequence Length</label>
+                      <input 
+                        type="number" 
+                        className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                        value={newAdapter.max_seq_length || ''}
+                        onChange={(e) => setNewAdapter({...newAdapter, max_seq_length: e.target.value ? parseInt(e.target.value) : null})}
+                        placeholder="e.g., 2048"
+                      />
+                    </div>
+                  </div>
+                  
+                  <div className="bg-gray-750 p-4 rounded-lg mb-6">
+                    <h4 className="text-sm font-medium text-gray-400 mb-2 flex items-center">
+                      <Info size={14} className="mr-1" />
+                      Training Information
+                    </h4>
+                    <p className="text-xs">
+                      LoRA (Low-Rank Adaptation) is a fine-tuning technique that adds small trainable layers to the frozen model.
+                      The rank parameter determines the expressiveness of the adapter, with higher values providing more capacity
+                      but requiring more memory and training time.
+                    </p>
+                  </div>
+                  
+                  <div className="flex justify-end space-x-2">
+                    <button 
+                      onClick={() => setAdaptersTab('list')}
+                      className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-md"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={createAdapter}
+                      className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-md flex items-center"
+                      disabled={!newAdapter.name || !newAdapter.base_model || !newAdapter.dataset}
+                    >
+                      <Save size={16} className="mr-2" />
+                      Save Adapter Config
+                    </button>
+                    <button 
+                      onClick={startTraining}
+                      className="bg-green-700 hover:bg-green-600 text-white px-4 py-2 rounded-md flex items-center"
+                      disabled={!newAdapter.name || !newAdapter.base_model || !newAdapter.dataset}
+                    >
+                      <Play size={16} className="mr-2" />
+                      Start Training
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              {/* Test adapter tab */}
+              {adaptersTab === 'test' && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                  <h3 className="text-lg font-semibold mb-4">Test Adapter</h3>
+                  
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div>
+                      <div className="mb-4">
+                        <label className="block text-sm font-medium mb-1">Select Adapter</label>
+                        <select
+                          className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200"
+                          value={selectedAdapter}
+                          onChange={(e) => setSelectedAdapter(e.target.value)}
+                        >
+                          <option value="">Select an adapter</option>
+                          {adapters.map(adapter => (
+                            <option key={adapter.name} value={adapter.name}>{adapter.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      
+                      <div className="mb-4">
+                        <label className="block text-sm font-medium mb-1">Prompt</label>
+                        <textarea 
+                          className="w-full bg-gray-700 border border-gray-600 rounded-md py-2 px-3 text-gray-200 h-32"
+                          placeholder="Enter a prompt to test the adapter..."
+                          value={testPrompt}
+                          onChange={(e) => setTestPrompt(e.target.value)}
+                        ></textarea>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-3 mb-4">
+                        <div>
+                          <label className="block text-xs font-medium mb-1">Temperature</label>
+                          <input 
+                            type="number" 
+                            className="w-full bg-gray-700 border border-gray-600 rounded-md py-1 px-2 text-gray-200"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value={testParams.temperature}
+                            onChange={(e) => setTestParams({...testParams, temperature: parseFloat(e.target.value)})}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">Top P</label>
+                          <input 
+                            type="number" 
+                            className="w-full bg-gray-700 border border-gray-600 rounded-md py-1 px-2 text-gray-200"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={testParams.top_p}
+                            onChange={(e) => setTestParams({...testParams, top_p: parseFloat(e.target.value)})}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">Max Tokens</label>
+                          <input 
+                            type="number" 
+                            className="w-full bg-gray-700 border border-gray-600 rounded-md py-1 px-2 text-gray-200"
+                            min="1"
+                            step="1"
+                            value={testParams.max_tokens}
+                            onChange={(e) => setTestParams({...testParams, max_tokens: parseInt(e.target.value)})}
+                          />
+                        </div>
+                      </div>
+                      
+                      <button
+                        onClick={testAdapter}
+                        disabled={isTestLoading || !selectedAdapter || !testPrompt}
+                        className={`w-full bg-purple-700 hover:bg-purple-600 text-white py-2 rounded flex items-center justify-center ${
+                          (isTestLoading || !selectedAdapter || !testPrompt) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                      >
+                        {isTestLoading ? (
+                          <>
+                            <RefreshCw size={16} className="mr-2 animate-spin" />
+                            Generating...
+                          </>
+                        ) : (
+                          <>
+                            <Play size={16} className="mr-2" />
+                            Test Adapter
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Response</label>
+                      <div className="bg-gray-750 border border-gray-700 rounded-md p-4 h-64 overflow-y-auto">
+                        {isTestLoading ? (
+                          <div className="h-full flex items-center justify-center">
+                            <div className="text-center">
+                              <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-purple-500" />
+                              <p>Generating response...</p>
+                            </div>
+                          </div>
+                        ) : testResult ? (
+                          <div className="text-gray-300 text-sm whitespace-pre-wrap">
+                            {testResult}
+                          </div>
+                        ) : (
+                          <div className="h-full flex items-center justify-center text-gray-500">
+                            <div className="text-center">
+                              <Info size={32} className="mx-auto mb-2" />
+                              <p>Select an adapter and enter a prompt to test</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="mt-4 bg-gray-750 p-3 rounded-lg">
+                        <h4 className="text-xs uppercase text-gray-400 mb-1">Testing Tips</h4>
+                        <ul className="text-xs text-gray-300 list-disc list-inside space-y-1">
+                          <li>Test with prompts similar to your fine-tuning dataset</li>
+                          <li>Try different temperature settings (lower for more focused outputs)</li>
+                          <li>If the adapter doesn't show expected behavior, you may need to train for more steps</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'datasets' && (
+            <div>
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold">Datasets</h2>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={fetchDatasets}
+                    className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-sm flex items-center"
+                    disabled={loading.datasets}
+                  >
+                    <RefreshCw size={14} className={`mr-1 ${loading.datasets ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                  <button 
+                    onClick={() => setDatasetsTab('upload')}
+                    className="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-sm flex items-center"
+                  >
+                    <Upload size={14} className="mr-1" /> Upload Dataset
+                  </button>
+                </div>
+              </div>
+              
+              {datasetsTab === 'list' && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                  <h3 className="p-4 border-b border-gray-700 text-lg font-semibold">Available Datasets</h3>
+                  
+                  {loading.datasets ? (
+                    <div className="p-6 text-center">
+                      <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-4 text-purple-500" />
+                      <p>Loading datasets...</p>
+                    </div>
+                  ) : datasets.length === 0 ? (
+                    <div className="p-8 text-center">
+                      <Info size={36} className="mx-auto mb-2 text-gray-400" />
+                      <p className="text-gray-400 mb-4">No datasets available</p>
+                      <button 
+                        onClick={() => setDatasetsTab('upload')}
+                        className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded"
+                      >
+                        Upload Your First Dataset
+                      </button>
+                    </div>
+                  ) : (
+                    <table className="min-w-full divide-y divide-gray-700">
+                      <thead className="bg-gray-700">
+                        <tr>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Name</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Samples</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Size</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Created</th>
+                          <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-700">
+                        {datasets.map(dataset => (
+                          <tr key={dataset.name} className="hover:bg-gray-750">
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="text-sm font-medium">{dataset.name}</div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {dataset.samples >= 0 ? dataset.samples.toLocaleString() : 'Unknown'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {formatFileSize(dataset.size)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-400">
+                              {formatTimestamp(dataset.created)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                              <button 
+                                onClick={() => {
+                                  setNewAdapter({
+                                    ...newAdapter,
+                                    dataset: dataset.name
+                                  });
+                                  setActiveTab('adapters');
+                                  setAdaptersTab('create');
+                                }}
+                                className="text-blue-400 hover:text-blue-300 mr-3"
+                              >
+                                Train
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setConfirmAction(() => () => deleteDataset(dataset.name));
+                                  setConfirmMessage(`Delete dataset "${dataset.name}"?`);
+                                  setShowConfirmDialog(true);
+                                }}
+                                className="text-red-400 hover:text-red-300"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+              
+              {datasetsTab === 'upload' && (
+                <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                  <h3 className="text-lg font-semibold mb-4">Upload Dataset</h3>
+                  
+                  <div className="mb-6">
+                    <label className="block text-sm font-medium mb-2">Select JSONL File</label>
+                    <input
+                      type="file"
+                      id="datasetUpload"
+                      accept=".jsonl"
+                      onChange={(e) => setUploadFile(e.target.files[0])}
+                      className="block w-full text-sm text-gray-400
+                        file:mr-4 file:py-2 file:px-4
+                        file:rounded file:border-0
+                        file:text-sm file:font-semibold
+                        file:bg-gray-700 file:text-gray-200
+                        hover:file:bg-gray-600"
+                    />
+                    <p className="mt-2 text-xs text-gray-400">
+                      Only JSONL format is supported. Each line must be a valid JSON object.
+                    </p>
+                  </div>
+                  
+                  <div className="bg-gray-750 p-4 rounded-lg mb-6">
+                    <h4 className="text-sm font-medium text-gray-400 mb-2 flex items-center">
+                      <Info size={14} className="mr-1" />
+                      Dataset Format
+                    </h4>
+                    <p className="text-xs mb-2">
+                      Datasets should be in JSONL format with each line containing a training sample.
+                      The expected format depends on the model and training approach:
+                    </p>
+                    <pre className="bg-gray-800 p-2 rounded text-xs overflow-x-auto">
+                      {"// Example for chat completion:\n" +
+                      '{"messages": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Hello!"}, {"role": "assistant", "content": "Hi there! How can I help you today?"}]}\n' +
+                      "\n// Example for text completion:\n" +
+                      '{"text": "Once upon a time, there was a little cottage in the woods."}'
+                      }
+                    </pre>
+                  </div>
+                  
+                  <div className="flex justify-end space-x-2">
+                    <button 
+                      onClick={() => setDatasetsTab('list')}
+                      className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-md"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={uploadDataset}
+                      className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-md flex items-center"
+                      disabled={!uploadFile}
+                    >
+                      <Upload size={16} className="mr-2" />
+                      Upload Dataset
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2005,9 +2754,12 @@ const AdminDashboard = () => {
                   >
                     Model List
                   </button>
+                  // Modify the "Add Model" button to reset state properly
                   <button 
                     onClick={() => {
                       setShowModelDialog(true);
+                      setIsEditMode(false);
+                      setEditingModelName("");
                       setNewModel({
                         name: "",
                         description: "",
@@ -2126,6 +2878,12 @@ const AdminDashboard = () => {
                                 Deploy
                               </button>
                               <button 
+                                onClick={() => editModel(model.name)}
+                                className="text-purple-400 hover:text-purple-300 mr-3"
+                              >
+                                Edit
+                              </button>
+                              <button 
                                 onClick={() => {
                                   setConfirmAction(() => () => deleteModel(model.name));
                                   setConfirmMessage(`Delete model configuration "${model.name}"?`);
@@ -2149,9 +2907,15 @@ const AdminDashboard = () => {
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                   <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
                     <div className="flex justify-between items-center mb-4">
-                      <h3 className="text-lg font-semibold">Add Model Configuration</h3>
+                      <h3 className="text-lg font-semibold">
+                        {isEditMode ? `Edit Model: ${editingModelName}` : 'Add Model Configuration'}  
+                      </h3>
                       <button 
-                        onClick={() => setShowModelDialog(false)}
+                        onClick={() => {
+                          setShowModelDialog(false);
+                          setIsEditMode(false);
+                          setEditingModelName("");
+                        }}
                         className="text-gray-400 hover:text-gray-200"
                       >
                         <X size={24} />
@@ -2383,11 +3147,11 @@ const AdminDashboard = () => {
                         Cancel
                       </button>
                       <button 
-                        onClick={createModel}
+                        onClick={saveModel}
                         className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-md"
                         disabled={!newModel.name || !newModel.model_id}
                       >
-                        Save Model
+                        {isEditMode ? 'Update Model' : 'Save Model'}
                       </button>
                     </div>
                   </div>

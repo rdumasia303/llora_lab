@@ -14,7 +14,6 @@ COPY requirements/common.txt /tmp/common.txt
 COPY requirements/serve.txt /tmp/serve.txt
 RUN pip install -r /tmp/common.txt -r /tmp/serve.txt
 
-
 RUN wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 RUN pip install --upgrade flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
 # Install Flash Attention to support newer models

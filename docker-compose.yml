@@ -16,6 +16,23 @@ x-gpu-config: &gpu-config
       hard: 67108864
 
 services:
+  # USE THIS FOR DEBUGGING PIP PACKAGE dependencies
+  # do a build and then run the container
+  # docker compose run --rm --service-ports pytorch-clean /bin/bash
+  # 
+  # Then you can install packages one by one and work out what works
+  #
+  # pytorch-clean:
+  #     image: nvcr.io/nvidia/pytorch:25.02-py3      
+  #     profiles: ["manual"]  # Not started by default
+  #     <<: *gpu-config
+  #     volumes:
+  #       - ./huggingface-cache:/huggingface-cache
+  #       - ./datasets:/workspace/training
+  #       - ./adapters:/workspace/adapters
+  #       - ./scripts:/workspace/scripts
+  #       - ./logs:/workspace/logs      
+
   # Admin API service - core orchestration
   admin-api:
     build:
@@ -26,7 +43,7 @@ services:
       - "8080:8080"
     volumes:
       - ./configs:/app/configs
-      - ./datasets:/app/datasets
+      - ./datasets:/app/datasets:shared
       - ./adapters:/app/adapters:shared
       - ./logs:/app/logs
       - ./huggingface-cache:/app/huggingface-cache:shared
@@ -77,6 +94,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}
     networks:
       - llora-lab-network
+    container_name: llora-lab-trainer
 
   # Pre-built vLLM server image - started on demand by admin-api
   vllm:

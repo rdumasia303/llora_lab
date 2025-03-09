@@ -486,37 +486,62 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
         adapter_output_dir = os.path.join(ADAPTER_DIR, adapter_config.name)
         os.makedirs(adapter_output_dir, exist_ok=True)
         
-        # Prepare log file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = os.path.join(LOG_DIR, f"training_{adapter_config.name}_{timestamp}.log")
+        # # Prepare log file
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # log_file = os.path.join(LOG_DIR, f"training_{adapter_config.name}_{timestamp}.log")
         
         # Build training command with all options from config
         # This directly builds a python command instead of relying on entrypoint scripts
-        cmd = [
-            "python", "/workspace/train.py",
-            "--model-name", model_config["model_id"],
-            "--dataset", f"/workspace/training/{os.path.basename(adapter_config.dataset)}",
-            "--output-dir", f"/workspace/adapters/{adapter_config.name}"
-        ]
-        
-        # Add all non-None parameters from the adapter config
-        config_dict = adapter_config.model_dump(exclude={"name", "description", "base_model", "dataset"})
-        for key, value in config_dict.items():
-            if value is not None:
-                cmd.extend([f"--{key.replace('_', '-')}", str(value)])
+
+        logger.info(f"Base model config: {model_config}")
+
+        # # Add all non-None parameters from the adapter config
+        # config_dict = adapter_config.model_dump(exclude={"name", "description", "base_model", "dataset"})
+        # for key, value in config_dict.items():
+        #     if value is not None:
+        #         cmd.extend([f"--{key.replace('_', '-')}", str(value)])
         
         # Add log file option
-        cmd.extend(["--log-file", f"/workspace/logs/{os.path.basename(log_file)}"])
+        #cmd.extend(["--log-file", f"/workspace/logs/{os.path.basename(log_file)}"])
+
+        # Get host mount paths
+        host_mounts = get_host_mount_paths()
+        
+        # The container paths in the admin-api container
+        hf_cache_container_path = '/app/huggingface-cache'
+        adapters_container_path = '/app/adapters'
+        # logs_container_path = '/app/logs'
+        datasets_container_path = '/app/datasets'
+
+        # Get corresponding host paths
+        hf_cache_host_path = host_mounts.get(hf_cache_container_path)
+        adapters_host_path = host_mounts.get(adapters_container_path)
+        # logs_host_path = host_mounts.get(logs_container_path)
+        datasets_host_path = host_mounts.get(datasets_container_path)
+
+        # Make sure we have all paths
+        if not all([hf_cache_host_path, adapters_host_path, datasets_host_path]):
+            raise Exception(f"Could not determine host paths: {host_mounts}")
+
+
+        cmd = [
+            "python", "/workspace/train2.py",
+            "--model-name", model_config["model_id"],
+            "--dataset", f"/datasets/{os.path.basename(adapter_config.dataset)}",
+            "--output-dir", f"/adapters/{adapter_config.name}"
+        ]
+        
 
         # Launch the training container with proper volume mounts
         container = docker_client.containers.run(
             "llora-lab-trainer",
+            #command=["/bin/bash", "-c", " ".join(cmd) + " || true; sleep 600"],
             command=cmd,
             volumes={
-                os.path.abspath(DATASET_DIR): {"bind": "/workspace/training", "mode": "ro"},
-                os.path.abspath(ADAPTER_DIR): {"bind": "/workspace/adapters", "mode": "rw"},
-                os.path.abspath(LOG_DIR): {"bind": "/workspace/logs", "mode": "rw"},
-                os.path.abspath(HF_CACHE_DIR): {"bind": "/huggingface-cache", "mode": "rw"}
+                adapters_host_path: {"bind": "/adapters", "mode": "rw"},
+                # logs_host_path: {"bind": "/logs", "mode": "rw"},
+                hf_cache_host_path: {"bind": "/huggingface-cache", "mode": "rw"},
+                datasets_host_path: {"bind": "/datasets", "mode": "rw"},                
             },
             environment={
                 "HF_HOME": "/huggingface-cache",
@@ -526,46 +551,67 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
             detach=True,
             remove=True,
             runtime="nvidia",
-            network=DOCKER_NETWORK_NAME
+            network=DOCKER_NETWORK_NAME,
+            name="llora-lab-trainer",
+            ipc_mode="host",
+            ulimits=[
+                docker.types.Ulimit(name="memlock", soft=-1, hard=-1),
+                docker.types.Ulimit(name="stack", soft=67108864, hard=67108864)
+            ],
+            device_requests=[
+                docker.types.DeviceRequest(
+                    count=-1,
+                    capabilities=[['gpu']]
+                )
+            ],
         )
+
+        #  # Immediately check container status
+        # container.reload()
+        # logger.info(f"Container initial status: {container.status}")
+        
+        # # Get initial logs
+        # initial_logs = container.logs().decode('utf-8')
+        # if initial_logs:
+        #     logger.info(f"Initial container logs:\n{initial_logs}")
         
         # Update job with container ID
         active_jobs[job_id]["container_id"] = container.id
         active_jobs[job_id]["status"] = "running"
-        active_jobs[job_id]["log_file"] = log_file
+        # active_jobs[job_id]["log_file"] = log_file
         
         # Monitor the training progress by reading the log file
         logger.info(f"Training job {job_id} started, container ID: {container.id}")
         
-        # Wait for log file to be created
-        start_time = datetime.now()
-        max_wait_seconds = 60
-        log_file_created = False
+        # # Wait for log file to be created
+        # start_time = datetime.now()
+        # max_wait_seconds = 60
+        # log_file_created = False
         
-        while (datetime.now() - start_time).total_seconds() < max_wait_seconds:
-            # Check if container is still running
-            try:
-                container.reload()
-                if container.status != "running":
-                    active_jobs[job_id]["status"] = "failed"
-                    active_jobs[job_id]["message"] = "Container stopped unexpectedly"
-                    return
-            except docker.errors.NotFound:
-                active_jobs[job_id]["status"] = "failed"
-                active_jobs[job_id]["message"] = "Container not found"
-                return
+        # while (datetime.now() - start_time).total_seconds() < max_wait_seconds:
+        #     # Check if container is still running
+        #     try:
+        #         container.reload()
+        #         if container.status != "running":
+        #             active_jobs[job_id]["status"] = "failed"
+        #             active_jobs[job_id]["message"] = "Container stopped unexpectedly"
+        #             return
+        #     except docker.errors.NotFound:
+        #         active_jobs[job_id]["status"] = "failed"
+        #         active_jobs[job_id]["message"] = "Container not found"
+        #         return
                 
-            # Check if log file exists
-            if os.path.exists(log_file):
-                log_file_created = True
-                break
+        #     # Check if log file exists
+        #     if os.path.exists(log_file):
+        #         log_file_created = True
+        #         break
                 
-            await asyncio.sleep(1)
+        #     await asyncio.sleep(1)
         
-        if not log_file_created:
-            # If log file wasn't created, use container logs instead
-            active_jobs[job_id]["message"] = "No log file created, using container logs"
-            active_jobs[job_id]["using_container_logs"] = True
+        # if not log_file_created:
+        #     # If log file wasn't created, use container logs instead
+        active_jobs[job_id]["message"] = "No log file created, using container logs"
+        active_jobs[job_id]["using_container_logs"] = True
         
         # Monitor job progress
         while True:
@@ -579,37 +625,48 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
                 active_jobs[job_id]["message"] = "Container not found"
                 break
             
-            # Read logs - either from file or container
-            if log_file_created:
-                # Read new lines from log file
-                try:
-                    with open(log_file, "r") as f:
-                        log_content = f.read()
-                    parse_training_log(job_id, log_content)
-                except Exception as e:
-                    logger.error(f"Error reading log file: {str(e)}")
-            else:
-                # Read from container logs
-                try:
-                    logs = container.logs(since=active_jobs[job_id].get("last_log_timestamp", 0)).decode("utf-8")
-                    if logs:
-                        parse_training_log(job_id, logs)
-                        active_jobs[job_id]["last_log_timestamp"] = int(datetime.now().timestamp())
-                except Exception as e:
-                    logger.error(f"Error reading container logs: {str(e)}")
+            # # Read logs - either from file or container
+            # if log_file_created:
+            #     # Read new lines from log file
+            #     try:
+            #         with open(log_file, "r") as f:
+            #             log_content = f.read()
+            #         parse_training_log(job_id, log_content)
+            #     except Exception as e:
+            #         logger.error(f"Error reading log file: {str(e)}")
+            # else:
+            # Read from container logs
+            try:
+                # Get logs since last check
+                last_timestamp = active_jobs[job_id].get("last_log_timestamp")
+                
+                if last_timestamp is None:
+                    # First time checking logs - get everything
+                    logs = container.logs().decode("utf-8")
+                else:
+                    # Convert timestamp to datetime for Docker API
+                    since_time = datetime.fromtimestamp(last_timestamp)
+                    logs = container.logs(since=since_time).decode("utf-8")
+                    
+                if logs:
+                    parse_training_log(job_id, logs)
+                    # Update timestamp after successful parsing
+                    active_jobs[job_id]["last_log_timestamp"] = datetime.now().timestamp()
+            except Exception as e:
+                logger.error(f"Error reading container logs: {str(e)}")
             
             await asyncio.sleep(2)
             
         # Container has stopped, check final status
         try:
-            # Force a final update from any remaining logs
-            if log_file_created and os.path.exists(log_file):
-                with open(log_file, "r") as f:
-                    log_content = f.read()
-                parse_training_log(job_id, log_content)
-            else:
-                logs = container.logs().decode("utf-8")
-                parse_training_log(job_id, logs)
+            # # Force a final update from any remaining logs
+            # if log_file_created and os.path.exists(log_file):
+            #     with open(log_file, "r") as f:
+            #         log_content = f.read()
+            #     parse_training_log(job_id, log_content)
+            # else:
+            logs = container.logs().decode("utf-8")
+            parse_training_log(job_id, logs)
             
             # Check if training completed successfully
             if active_jobs[job_id]["status"] != "completed":
@@ -633,47 +690,56 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
 def parse_training_log(job_id: str, log_content: str):
     """Parse training logs to update job status"""
     try:
-        # Extract training step, loss, etc.
+        # Extract training metrics
         job = active_jobs[job_id]
         
-        # Check for step information
-        for line in log_content.split('\n'):
-            if "step" in line.lower() and "loss" in line.lower():
-                # Look for patterns like "Step 10/60, loss: 2.345, lr: 0.0001"
-                parts = line.split()
-                
-                # Find step information
-                for i, part in enumerate(parts):
-                    if "step" in part.lower() and i + 1 < len(parts):
-                        step_info = parts[i + 1].strip(',')
-                        if '/' in step_info:
-                            current_step, total_steps = map(int, step_info.split('/'))
-                            job["step"] = current_step
-                            job["total_steps"] = total_steps
-                
-                # Find loss information
-                for i, part in enumerate(parts):
-                    if "loss:" in part.lower() and i + 1 < len(parts):
-                        try:
-                            loss_value = float(parts[i + 1].strip(','))
-                            job["loss"] = loss_value
-                        except ValueError:
-                            pass
-                
-                # Find learning rate information
-                for i, part in enumerate(parts):
-                    if "lr:" in part.lower() and i + 1 < len(parts):
-                        try:
-                            lr_value = float(parts[i + 1].strip(','))
-                            job["learning_rate"] = lr_value
-                        except ValueError:
-                            pass
+        # First check for Unsloth initialization info
+        if "Total steps =" in log_content:
+            for line in log_content.split('\n'):
+                if "Num Epochs =" in line:
+                    try:
+                        # Parse total epochs from Unsloth output
+                        total_epochs = float(line.split("Num Epochs =")[1].split("|")[0].strip())
+                        job["total_epochs"] = total_epochs
+                    except Exception as e:
+                        logger.error(f"Error parsing total epochs: {str(e)}")
         
-        # Check for completion
-        if "training complete" in log_content.lower() or "model saved" in log_content.lower():
+        # Look for training progress lines
+        for line in log_content.split('\n'):
+            if not line.strip().startswith("{") or not line.strip().endswith("}"):
+                continue
+                
+            if "'loss':" in line:
+                try:
+                    metrics = eval(line.strip())
+                    
+                    if isinstance(metrics, dict):
+                        # Update basic metrics
+                        if 'loss' in metrics:
+                            job["loss"] = metrics['loss']
+                        if 'learning_rate' in metrics:
+                            job["learning_rate"] = metrics['learning_rate']
+                        if 'grad_norm' in metrics:
+                            job["grad_norm"] = metrics['grad_norm']
+                        if 'epoch' in metrics:
+                            current_epoch = metrics['epoch']
+                            job["current_epoch"] = current_epoch
+                            
+                            # Calculate progress based on epochs
+                            total_epochs = job.get("total_epochs", 5.0)  # Default to 5 if not found
+                            progress = (current_epoch / total_epochs) * 100
+                            job["step"] = int(progress)  # Use percentage as step
+                            
+                except Exception as e:
+                    logger.error(f"Error parsing metrics line: {str(e)}")
+                    continue
+
+        # Check for completion markers
+        if "Model saved to" in log_content:
             job["status"] = "completed"
             job["message"] = "Training completed successfully"
-        
+            job["step"] = 100
+            
     except Exception as e:
         logger.error(f"Error parsing log: {str(e)}")
 
@@ -695,7 +761,7 @@ async def start_training_job(adapter_name: str, background_tasks: BackgroundTask
     
     # Initialize job with defaults 
     # Note: We don't hardcode step counts or other values, these come from the config
-    total_steps = adapter_config.steps or 60  # Use config value or fallback to default
+    total_steps = adapter_config.steps or 100  # Use config value or fallback to default
     
     job = {
         "id": job_id,
