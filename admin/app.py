@@ -16,6 +16,7 @@ import uuid
 import asyncio
 import httpx
 import time
+import re
 from datetime import datetime
 
 # Configure logging
@@ -63,8 +64,12 @@ ADAPTER_DIR = os.path.join(BASE_DIR, "adapters")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 HF_CACHE_DIR = os.path.join(BASE_DIR, "huggingface-cache")
 
+# Create log subdirectories
+TRAINING_LOG_DIR = os.path.join(LOG_DIR, "training")
+SERVING_LOG_DIR = os.path.join(LOG_DIR, "serving")
+
 # Ensure directories exist
-for dir_path in [CONFIG_DIR, DATASET_DIR, ADAPTER_DIR, LOG_DIR, HF_CACHE_DIR]:
+for dir_path in [CONFIG_DIR, DATASET_DIR, ADAPTER_DIR, LOG_DIR, HF_CACHE_DIR, TRAINING_LOG_DIR, SERVING_LOG_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 # Shared docker network name
@@ -217,6 +222,71 @@ def format_container_logs(logs_text):
         return logs_text
 
 
+# def save_final_logs(job_id, container_id, job_type):
+#     """Save final logs when container stops"""
+#     log_dir = TRAINING_LOG_DIR if job_type == "training" else SERVING_LOG_DIR
+#     log_file = os.path.join(log_dir, f"{job_id}_final.log")
+    
+#     try:
+#         # Try to get container
+#         container = docker_client.containers.get(container_id)
+#         # Get all logs
+#         logs = container.logs().decode("utf-8")
+#         # Save to file
+#         with open(log_file, "w") as f:
+#             f.write(logs)
+        
+#         # Update job to use this file
+#         if job_id in active_jobs:
+#             active_jobs[job_id]["final_log_path"] = log_file
+            
+#         return True
+#     except Exception as e:
+#         logger.error(f"Error saving final logs: {str(e)}")
+#         return False
+
+def save_final_logs(job_id, container_id, job_type):
+    """Save final logs when container stops"""
+    log_dir = TRAINING_LOG_DIR if job_type == "training" else SERVING_LOG_DIR
+    os.makedirs(log_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"{job_type}_{job_id}_{timestamp}.log")
+    
+    try:
+        # Try to get container
+        container = docker_client.containers.get(container_id)
+        # Get all logs
+        logs = container.logs().decode("utf-8")
+        # Save to file
+        with open(log_file, "w") as f:
+            f.write(logs)
+        
+        # Update job to use this file
+        if job_id in active_jobs:
+            active_jobs[job_id]["final_log_path"] = log_file
+            # Also store logs directly in job record as backup
+            active_jobs[job_id]["parsed_logs"] = logs
+            
+        logger.info(f"Successfully saved logs for {job_type} job {job_id}")
+        return logs
+    except Exception as e:
+        logger.error(f"Error saving final logs: {str(e)}")
+        return None
+
+
+def count_dataset_samples(file_path):
+    """Count samples in JSONL without loading entire file"""
+    try:
+        count = 0
+        with open(file_path, 'rb') as f:
+            for _ in f:
+                count += 1
+        return count
+    except Exception as e:
+        logger.error(f"Error counting dataset samples: {str(e)}")
+        return -1
+
 
 @app.on_event("startup")
 async def startup():
@@ -231,6 +301,16 @@ async def root():
         "message": "Llora Lab API is running",
         "version": "1.0.0",
         "hf_token_configured": bool(HF_TOKEN)
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint"""
+    return {
+        "status": "ok",
+        "time": datetime.now().isoformat(),
+        "version": "1.0.0"
     }
 
 
@@ -391,11 +471,7 @@ async def upload_dataset(file: UploadFile = File(...)):
             os.replace(fixed_path, file_path)
             
             # Count lines again
-            line_count = 0
-            with open(file_path, "r") as f:
-                for line in f:
-                    json.loads(line)
-                    line_count += 1
+            line_count = count_dataset_samples(file_path)
         except Exception as e:
             os.remove(file_path)
             raise HTTPException(status_code=400, detail=f"Invalid JSONL format and couldn't fix: {str(e)}")
@@ -432,22 +508,39 @@ async def list_datasets():
             file_path = os.path.join(DATASET_DIR, filename)
             
             # Count samples
-            try:
-                line_count = 0
-                with open(file_path, "r") as f:
-                    for _ in f:
-                        line_count += 1
-            except Exception:
-                line_count = -1
+            sample_count = count_dataset_samples(file_path)
             
             datasets.append({
                 "name": filename,
                 "path": file_path,
                 "size": os.path.getsize(file_path),
-                "samples": line_count,
+                "samples": sample_count,
                 "created": datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
             })
     return datasets
+
+
+@app.get("/datasets/{name}/preview")
+async def preview_dataset(name: str, limit: int = 10):
+    """Preview first N samples from a dataset"""
+    dataset_path = os.path.join(DATASET_DIR, name)
+    if not os.path.exists(dataset_path):
+        raise HTTPException(status_code=404, detail=f"Dataset {name} not found")
+    
+    try:
+        samples = []
+        with open(dataset_path, "r") as f:
+            for i, line in enumerate(f):
+                if i >= limit:
+                    break
+                try:
+                    samples.append(json.loads(line))
+                except json.JSONDecodeError:
+                    samples.append({"error": "Invalid JSON line", "raw": line[:100] + "..."})
+        
+        return {"samples": samples}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading dataset: {str(e)}")
 
 
 @app.delete("/datasets/{name}")
@@ -486,43 +579,22 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
         adapter_output_dir = os.path.join(ADAPTER_DIR, adapter_config.name)
         os.makedirs(adapter_output_dir, exist_ok=True)
         
-        # # Prepare log file
-        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # log_file = os.path.join(LOG_DIR, f"training_{adapter_config.name}_{timestamp}.log")
-        
-        # Build training command with all options from config
-        # This directly builds a python command instead of relying on entrypoint scripts
-
-        logger.info(f"Base model config: {model_config}")
-
-        # # Add all non-None parameters from the adapter config
-        # config_dict = adapter_config.model_dump(exclude={"name", "description", "base_model", "dataset"})
-        # for key, value in config_dict.items():
-        #     if value is not None:
-        #         cmd.extend([f"--{key.replace('_', '-')}", str(value)])
-        
-        # Add log file option
-        #cmd.extend(["--log-file", f"/workspace/logs/{os.path.basename(log_file)}"])
-
         # Get host mount paths
         host_mounts = get_host_mount_paths()
         
         # The container paths in the admin-api container
         hf_cache_container_path = '/app/huggingface-cache'
         adapters_container_path = '/app/adapters'
-        # logs_container_path = '/app/logs'
         datasets_container_path = '/app/datasets'
 
         # Get corresponding host paths
         hf_cache_host_path = host_mounts.get(hf_cache_container_path)
         adapters_host_path = host_mounts.get(adapters_container_path)
-        # logs_host_path = host_mounts.get(logs_container_path)
         datasets_host_path = host_mounts.get(datasets_container_path)
 
         # Make sure we have all paths
         if not all([hf_cache_host_path, adapters_host_path, datasets_host_path]):
             raise Exception(f"Could not determine host paths: {host_mounts}")
-
 
         cmd = [
             "python", "/workspace/train2.py",
@@ -531,155 +603,197 @@ async def run_training_job(job_id: str, adapter_config: AdapterConfig):
             "--output-dir", f"/adapters/{adapter_config.name}"
         ]
         
-
         # Launch the training container with proper volume mounts
-        container = docker_client.containers.run(
-            "llora-lab-trainer",
-            #command=["/bin/bash", "-c", " ".join(cmd) + " || true; sleep 600"],
-            command=cmd,
-            volumes={
-                adapters_host_path: {"bind": "/adapters", "mode": "rw"},
-                # logs_host_path: {"bind": "/logs", "mode": "rw"},
-                hf_cache_host_path: {"bind": "/huggingface-cache", "mode": "rw"},
-                datasets_host_path: {"bind": "/datasets", "mode": "rw"},                
-            },
-            environment={
-                "HF_HOME": "/huggingface-cache",
-                "PYTHONUNBUFFERED": "1",
-                "HF_TOKEN": HF_TOKEN
-            },
-            detach=True,
-            remove=True,
-            runtime="nvidia",
-            network=DOCKER_NETWORK_NAME,
-            name="llora-lab-trainer",
-            ipc_mode="host",
-            ulimits=[
-                docker.types.Ulimit(name="memlock", soft=-1, hard=-1),
-                docker.types.Ulimit(name="stack", soft=67108864, hard=67108864)
-            ],
-            device_requests=[
-                docker.types.DeviceRequest(
-                    count=-1,
-                    capabilities=[['gpu']]
-                )
-            ],
-        )
+        try:
+            container = docker_client.containers.run(
+                "llora-lab-trainer",
+                command=cmd,
+                volumes={
+                    adapters_host_path: {"bind": "/adapters", "mode": "rw"},
+                    hf_cache_host_path: {"bind": "/huggingface-cache", "mode": "rw"},
+                    datasets_host_path: {"bind": "/datasets", "mode": "rw"},                
+                },
+                environment={
+                    "HF_HOME": "/huggingface-cache",
+                    "PYTHONUNBUFFERED": "1",
+                    "HF_TOKEN": HF_TOKEN
+                },
+                detach=True,
+                remove=False,  # CRITICAL CHANGE: Don't auto-remove the container
+                runtime="nvidia",
+                network=DOCKER_NETWORK_NAME,
+                name=f"llora-lab-trainer-{job_id[:8]}",  # Add job ID to name to avoid conflicts
+                ipc_mode="host",
+                ulimits=[
+                    docker.types.Ulimit(name="memlock", soft=-1, hard=-1),
+                    docker.types.Ulimit(name="stack", soft=67108864, hard=67108864)
+                ],
+                device_requests=[
+                    docker.types.DeviceRequest(
+                        count=-1,
+                        capabilities=[['gpu']]
+                    )
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Error launching container: {str(e)}")
+            active_jobs[job_id]["status"] = "failed"
+            active_jobs[job_id]["message"] = f"Failed to launch container: {str(e)}"
+            return
 
-        #  # Immediately check container status
-        # container.reload()
-        # logger.info(f"Container initial status: {container.status}")
-        
-        # # Get initial logs
-        # initial_logs = container.logs().decode('utf-8')
-        # if initial_logs:
-        #     logger.info(f"Initial container logs:\n{initial_logs}")
-        
-        # Update job with container ID
+        # Update job with container ID and name
         active_jobs[job_id]["container_id"] = container.id
+        active_jobs[job_id]["container_name"] = container.name if hasattr(container, 'name') else "llora-lab-trainer"
         active_jobs[job_id]["status"] = "running"
-        # active_jobs[job_id]["log_file"] = log_file
-        
-        # Monitor the training progress by reading the log file
-        logger.info(f"Training job {job_id} started, container ID: {container.id}")
-        
-        # # Wait for log file to be created
-        # start_time = datetime.now()
-        # max_wait_seconds = 60
-        # log_file_created = False
-        
-        # while (datetime.now() - start_time).total_seconds() < max_wait_seconds:
-        #     # Check if container is still running
-        #     try:
-        #         container.reload()
-        #         if container.status != "running":
-        #             active_jobs[job_id]["status"] = "failed"
-        #             active_jobs[job_id]["message"] = "Container stopped unexpectedly"
-        #             return
-        #     except docker.errors.NotFound:
-        #         active_jobs[job_id]["status"] = "failed"
-        #         active_jobs[job_id]["message"] = "Container not found"
-        #         return
-                
-        #     # Check if log file exists
-        #     if os.path.exists(log_file):
-        #         log_file_created = True
-        #         break
-                
-        #     await asyncio.sleep(1)
-        
-        # if not log_file_created:
-        #     # If log file wasn't created, use container logs instead
-        active_jobs[job_id]["message"] = "No log file created, using container logs"
+        active_jobs[job_id]["message"] = "Training job started, monitoring progress"
         active_jobs[job_id]["using_container_logs"] = True
-        
+
+        logger.info(f"Training job {job_id} started, container ID: {container.id}")
+
         # Monitor job progress
+        last_logs_capture_time = datetime.now()
+        logs_capture_interval = 15  # seconds, capture logs every 15 seconds during training
+
         while True:
             # Keep container status updated
             try:
                 container.reload()
                 if container.status != "running":
+                    # Container has stopped - we'll handle this after the loop
+                    logger.info(f"Container {container.id} status changed to: {container.status}")
                     break
             except docker.errors.NotFound:
                 active_jobs[job_id]["status"] = "failed"
-                active_jobs[job_id]["message"] = "Container not found"
-                break
-            
-            # # Read logs - either from file or container
-            # if log_file_created:
-            #     # Read new lines from log file
-            #     try:
-            #         with open(log_file, "r") as f:
-            #             log_content = f.read()
-            #         parse_training_log(job_id, log_content)
-            #     except Exception as e:
-            #         logger.error(f"Error reading log file: {str(e)}")
-            # else:
-            # Read from container logs
-            try:
-                # Get logs since last check
-                last_timestamp = active_jobs[job_id].get("last_log_timestamp")
-                
-                if last_timestamp is None:
-                    # First time checking logs - get everything
-                    logs = container.logs().decode("utf-8")
-                else:
-                    # Convert timestamp to datetime for Docker API
-                    since_time = datetime.fromtimestamp(last_timestamp)
-                    logs = container.logs(since=since_time).decode("utf-8")
-                    
-                if logs:
-                    parse_training_log(job_id, logs)
-                    # Update timestamp after successful parsing
-                    active_jobs[job_id]["last_log_timestamp"] = datetime.now().timestamp()
+                active_jobs[job_id]["message"] = "Container not found during monitoring"
+                return
             except Exception as e:
-                logger.error(f"Error reading container logs: {str(e)}")
+                logger.error(f"Error checking container status: {str(e)}")
+                # Continue the loop, don't break
+            
+            # Periodically capture logs during training to ensure we have them
+            # even if the container disappears later
+            current_time = datetime.now()
+            if (current_time - last_logs_capture_time).total_seconds() >= logs_capture_interval:
+                try:
+                    # Save intermediate logs
+                    logs = container.logs().decode("utf-8")
+                    active_jobs[job_id]["parsed_logs"] = logs  # Store directly in job record
+                    
+                    # Parse log for metrics
+                    parse_training_log(job_id, logs)
+                    
+                    # Update timestamp after successful parsing
+                    last_logs_capture_time = current_time
+                    active_jobs[job_id]["last_log_timestamp"] = current_time.timestamp()
+                    logger.debug(f"Captured intermediate logs for job {job_id}")
+                except Exception as e:
+                    logger.error(f"Error capturing logs: {str(e)}")
             
             await asyncio.sleep(2)
-            
-        # Container has stopped, check final status
+
+        # Container has stopped - now handle final processing
         try:
-            # # Force a final update from any remaining logs
-            # if log_file_created and os.path.exists(log_file):
-            #     with open(log_file, "r") as f:
-            #         log_content = f.read()
-            #     parse_training_log(job_id, log_content)
-            # else:
-            logs = container.logs().decode("utf-8")
-            parse_training_log(job_id, logs)
+            # First and most importantly - save the logs before anything else
+            logger.info(f"Container stopped, saving final logs for job {job_id}")
+            logs = None
             
-            # Check if training completed successfully
-            if active_jobs[job_id]["status"] != "completed":
-                if os.path.exists(os.path.join(adapter_output_dir, "adapter_model.bin")):
-                    active_jobs[job_id]["status"] = "completed"
-                    active_jobs[job_id]["message"] = "Training completed successfully"
-                else:
-                    active_jobs[job_id]["status"] = "failed"
-                    active_jobs[job_id]["message"] = "Training job stopped without completing"
+            try:
+                # Try to get the container - it should still exist since we disabled auto-removal
+                container.reload()
+                logs = container.logs().decode("utf-8")
+                
+                # Store logs in multiple places for redundancy
+                active_jobs[job_id]["parsed_logs"] = logs
+                
+                # Save to disk
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_file = os.path.join(TRAINING_LOG_DIR, f"training_{job_id}_{timestamp}.log")
+                os.makedirs(os.path.dirname(log_file), exist_ok=True)
+                
+                with open(log_file, "w") as f:
+                    f.write(logs)
+                    
+                active_jobs[job_id]["final_log_path"] = log_file
+                logger.info(f"Saved training logs to {log_file}")
+            except Exception as e:
+                logger.error(f"Error saving final logs directly: {str(e)}")
+                # Try the helper function as fallback
+                logs = save_final_logs(job_id, container.id, "training")
+            
+            # If we still don't have logs but have parsed logs stored earlier, use those
+            if not logs and "parsed_logs" in active_jobs[job_id]:
+                logs = active_jobs[job_id]["parsed_logs"]
+                logger.info("Using previously captured logs for final analysis")
+            
+            # Only parse logs if we have them
+            if logs:
+                parse_training_log(job_id, logs)
+            
+            # Check for multiple ways to determine success
+            adapter_output_dir = os.path.join(ADAPTER_DIR, adapter_config.name)
+            adapter_path = os.path.join(adapter_output_dir, "adapter_model.bin")
+            adapter_safetensors_path = os.path.join(adapter_output_dir, "adapter_model.safetensors")
+            adapter_config_path = os.path.join(adapter_output_dir, "adapter_config.json")
+            
+            # Log directory contents for debugging
+            logger.info(f"Checking for adapter files in {adapter_output_dir}")
+            if os.path.exists(adapter_output_dir):
+                files = os.listdir(adapter_output_dir)
+                logger.info(f"Files in adapter dir: {files}")
+            else:
+                logger.warning(f"Adapter directory does not exist: {adapter_output_dir}")
+            
+            # Success check logic - expanded to be more robust
+            success = False
+            reason = "unknown"
+            
+            # 1. Check for output files
+            if os.path.exists(adapter_path) or os.path.exists(adapter_safetensors_path) or os.path.exists(adapter_config_path):
+                success = True
+                reason = "found adapter output files"
+            # 2. Check logs for common success patterns
+            elif logs and any(marker.lower() in logs.lower() for marker in [
+                "Training completed", 
+                "Model saved", 
+                "Saved adapter",
+                "successfully saved",
+                "training complete"
+            ]):
+                success = True
+                reason = "found success indicators in logs"
+            # 3. If we have files in the adapter directory, consider it a success
+            elif os.path.exists(adapter_output_dir) and len(os.listdir(adapter_output_dir)) > 0:
+                success = True
+                reason = "found files in adapter directory"
+                
+            # Set job status based on success determination
+            if success:
+                active_jobs[job_id]["status"] = "completed"
+                active_jobs[job_id]["message"] = f"Training completed successfully ({reason})"
+                # Make sure step count is set to total for completed jobs
+                if "total_steps" in active_jobs[job_id]:
+                    active_jobs[job_id]["step"] = active_jobs[job_id]["total_steps"]
+                logger.info(f"Training job {job_id} marked as completed - {reason}")
+            else:
+                active_jobs[job_id]["status"] = "failed"
+                active_jobs[job_id]["message"] = "Training job stopped without creating output files"
+                logger.warning(f"Training job {job_id} marked as failed - no success indicators found")
+                
+            # Always log the final status
+            logger.info(f"Training job {job_id} final status: {active_jobs[job_id]['status']}")
+            
         except Exception as e:
-            logger.error(f"Error parsing final logs: {str(e)}")
+            logger.error(f"Error finalizing training job: {str(e)}", exc_info=True)
             active_jobs[job_id]["status"] = "failed"
-            active_jobs[job_id]["message"] = str(e)
+            active_jobs[job_id]["message"] = f"Error finalizing job: {str(e)}"
+            
+        finally:
+            # Always try to clean up container in a finally block
+            try:
+                if "container_id" in active_jobs[job_id]:
+                    cleanup_training_container(active_jobs[job_id]["container_id"])
+            except Exception as e:
+                logger.error(f"Error cleaning up container: {str(e)}")
     
     except Exception as e:
         logger.error(f"Training job {job_id} failed: {str(e)}", exc_info=True)
@@ -692,6 +806,62 @@ def parse_training_log(job_id: str, log_content: str):
     try:
         # Extract training metrics
         job = active_jobs[job_id]
+        found_metrics = False
+        
+        # Look for structured metrics (JSON-like)
+        for line in log_content.split('\n'):
+            # Try to find JSON objects or Python dicts in the log
+            if (line.strip().startswith("{") and line.strip().endswith("}")) or "loss:" in line.lower():
+                try:
+                    # Clean ANSI color codes
+                    clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+                    match = re.search(r'({.+})', clean_line)
+                    
+                    if match:
+                        try:
+                            metrics = json.loads(match.group(1))
+                        except json.JSONDecodeError:
+                            # Try eval as fallback
+                            metrics = eval(match.group(1))
+                        
+                        if isinstance(metrics, dict):
+                            # Update metrics
+                            if 'loss' in metrics:
+                                job["loss"] = float(metrics['loss'])
+                                found_metrics = True
+                            if 'learning_rate' in metrics:
+                                job["learning_rate"] = float(metrics['learning_rate'])
+                            if 'step' in metrics:
+                                job["step"] = int(metrics['step'])
+                            if 'epoch' in metrics:
+                                job["current_epoch"] = float(metrics['epoch'])
+                                # Calculate step from epoch if needed
+                                if "total_epochs" in job and "total_steps" in job:
+                                    progress_pct = (job["current_epoch"] / job["total_epochs"])
+                                    job["step"] = int(progress_pct * job["total_steps"])
+                except Exception as e:
+                    logger.error(f"Error parsing metrics: {str(e)}")
+        
+        # If no structured metrics, try regex patterns
+        if not found_metrics:
+            # Try to extract loss values
+            loss_match = re.search(r'loss[:\s=]+([0-9.]+)', log_content.lower())
+            if loss_match:
+                try:
+                    job["loss"] = float(loss_match.group(1))
+                except:
+                    pass
+            
+            # Try to extract step information
+            step_match = re.search(r'step[:\s=]+(\d+)[/\s]+(\d+)', log_content.lower())
+            if step_match:
+                try:
+                    current_step = int(step_match.group(1))
+                    total_steps = int(step_match.group(2))
+                    job["step"] = current_step
+                    job["total_steps"] = total_steps
+                except:
+                    pass
         
         # First check for Unsloth initialization info
         if "Total steps =" in log_content:
@@ -735,18 +905,46 @@ def parse_training_log(job_id: str, log_content: str):
                     continue
 
         # Check for completion markers
-        if "Model saved to" in log_content:
+        if "Model saved to" in log_content or "Training completed" in log_content:
             job["status"] = "completed"
             job["message"] = "Training completed successfully"
-            job["step"] = 100
+            job["step"] = job.get("total_steps", 100)
             
     except Exception as e:
         logger.error(f"Error parsing log: {str(e)}")
 
+def cleanup_training_container(container_id):
+    """Clean up a training container that has finished but wasn't auto-removed"""
+    try:
+        container = docker_client.containers.get(container_id)
+        logger.info(f"Cleaning up training container: {container.name} ({container.id})")
+        container.remove(force=True)
+    except docker.errors.NotFound:
+        logger.info(f"Container {container_id} already removed")
+    except Exception as e:
+        logger.error(f"Error removing container {container_id}: {str(e)}")
+
 
 @app.post("/training/start", response_model=TrainingJob)
-async def start_training_job(adapter_name: str, background_tasks: BackgroundTasks):
+async def start_training_job(adapter_name: str, background_tasks: BackgroundTasks, force: bool = False):
     """Start a training job for an adapter configuration"""
+    # Check for active serving jobs (they use GPU)
+    active_serving = [j for j in active_jobs.values() 
+                     if "model_conf" in j and j.get("status") in ["starting", "initializing", "running", "ready"]]
+    
+    if active_serving and not force:
+        # Return 409 Conflict with details
+        serving_job = active_serving[0]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Cannot start training while a model is being served. Stop the serving job first.",
+                "conflict_type": "serving",
+                "job_id": next(jid for jid, j in active_jobs.items() if j == serving_job),
+                "model": serving_job.get("model_conf")
+            }
+        )
+
     # Load adapter config
     config_path = os.path.join(CONFIG_DIR, f"adapter_{adapter_name}.toml")
     if not os.path.exists(config_path):
@@ -811,7 +1009,20 @@ async def get_training_logs(job_id: str, lines: int = 100):
     
     job = active_jobs[job_id]
     
-    # First check if we're using container logs
+    # First check for final logs file
+    if "final_log_path" in job and os.path.exists(job["final_log_path"]):
+        try:
+            with open(job["final_log_path"], "r") as f:
+                all_lines = f.readlines()
+                
+            # Return the last N lines
+            log_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return {"logs": "".join(log_lines)}
+        except Exception as e:
+            logger.error(f"Error reading final log file: {str(e)}")
+            # Continue to try other log sources
+    
+    # Check if we're using container logs
     if job.get("using_container_logs", False) and "container_id" in job:
         try:
             container = docker_client.containers.get(job["container_id"])
@@ -850,6 +1061,10 @@ async def stop_training_job(job_id: str):
         try:
             container = docker_client.containers.get(job["container_id"])
             container.stop()
+            
+            # Save final logs
+            save_final_logs(job_id, job["container_id"], "training")
+            
             job["status"] = "stopped"
             job["message"] = "Training job was manually stopped"
         except Exception as e:
@@ -943,7 +1158,7 @@ async def run_serving_job(job_id: str, model_config: ModelConfig, adapter: Optio
         
         # Prepare log file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = os.path.join(LOG_DIR, f"serving_{model_config.name}_{timestamp}.log")
+        log_file = os.path.join(SERVING_LOG_DIR, f"serving_{model_config.name}_{timestamp}.log")
         active_jobs[job_id]["log_file"] = log_file
         
         # Stop any existing vLLM or webui containers
@@ -1084,6 +1299,8 @@ async def run_serving_job(job_id: str, model_config: ModelConfig, adapter: Optio
             try:
                 container.reload()
                 if container.status != "running":
+                    # Save final logs before reporting error
+                    save_final_logs(job_id, container.id, "serving")
                     raise Exception(f"Container stopped with status: {container.status}")
                 
                 # Check logs for server ready message
@@ -1110,6 +1327,8 @@ async def run_serving_job(job_id: str, model_config: ModelConfig, adapter: Optio
             await asyncio.sleep(5)
         
         if not server_ready:
+            # Save logs before stopping
+            save_final_logs(job_id, container.id, "serving")
             active_jobs[job_id]["status"] = "failed"
             active_jobs[job_id]["message"] = "vLLM server failed to start within timeout period"
             container.stop()
@@ -1158,6 +1377,8 @@ async def run_serving_job(job_id: str, model_config: ModelConfig, adapter: Optio
                 # First check vLLM container
                 container.reload()
                 if container.status != "running":
+                    # Save final logs before marking as stopped
+                    save_final_logs(job_id, container.id, "serving")
                     active_jobs[job_id]["status"] = "stopped"
                     active_jobs[job_id]["message"] = "vLLM server stopped unexpectedly"
                     break
@@ -1215,7 +1436,7 @@ def stop_existing_containers():
 
 
 @app.post("/serving/start", response_model=ServingJob)
-async def start_serving_job(model_name: str, background_tasks: BackgroundTasks, adapter: Optional[str] = None):
+async def start_serving_job(model_name: str, background_tasks: BackgroundTasks, adapter: Optional[str] = None, force: bool = False):
     """Start a serving job for a model configuration with optional adapter"""
     # Check for existing serving jobs
     for job_id, job in active_jobs.items():
@@ -1224,6 +1445,23 @@ async def start_serving_job(model_name: str, background_tasks: BackgroundTasks, 
                 status_code=400, 
                 detail="A serving job is already running. Stop it before starting a new one."
             )
+    
+    # Check for active training jobs (they use GPU)
+    active_training = [j for j in active_jobs.values() 
+                      if "adapter_config" in j and j.get("status") not in ["completed", "failed", "stopped"]]
+    
+    if active_training and not force:
+        # Return 409 Conflict with details
+        training_job = active_training[0]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Cannot start serving while a training job is active. Stop the training job first.",
+                "conflict_type": "training",
+                "job_id": next(jid for jid, j in active_jobs.items() if j == training_job),
+                "adapter": training_job.get("adapter_config")
+            }
+        )
     
     # Load model config
     config_path = os.path.join(CONFIG_DIR, f"{model_name}.toml")
@@ -1292,6 +1530,19 @@ async def get_serving_logs(job_id: str, lines: int = 100):
     
     job = active_jobs[job_id]
     
+    # First check for final logs file
+    if "final_log_path" in job and os.path.exists(job["final_log_path"]):
+        try:
+            with open(job["final_log_path"], "r") as f:
+                all_lines = f.readlines()
+                
+            # Return the last N lines
+            log_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return {"logs": "".join(log_lines)}
+        except Exception as e:
+            logger.error(f"Error reading final log file: {str(e)}")
+            # Continue to try other log sources
+    
     # Try to get logs from container directly
     if "container_id" in job:
         try:
@@ -1339,6 +1590,10 @@ async def stop_serving_job(job_id: str):
     if "container_id" in job:
         try:
             container = docker_client.containers.get(job["container_id"])
+            
+            # Save final logs before stopping
+            save_final_logs(job_id, job["container_id"], "serving")
+            
             container.stop()
             job["status"] = "stopped"
             job["message"] = "Serving job was manually stopped"
@@ -1503,9 +1758,40 @@ async def test_adapter(adapter_name: str, prompt: str,
         raise HTTPException(status_code=500, detail=f"Error testing adapter: {str(e)}")
 
 
+@app.get("/jobs/status")
+@cache(expire=3)
+async def get_jobs_status():
+    """Get simplified status of all jobs in one request for efficient polling"""
+    training_status = {
+        job_id: {
+            "status": job["status"], 
+            "step": job.get("step"), 
+            "total_steps": job.get("total_steps"),
+            "adapter_config": job["adapter_config"]
+        }
+        for job_id, job in active_jobs.items() if "adapter_config" in job
+    }
+    
+    serving_status = {
+        job_id: {
+            "status": job["status"], 
+            "requests": job.get("requests_served", 0),
+            "model_conf": job["model_conf"],
+            "adapter": job.get("adapter")
+        }
+        for job_id, job in active_jobs.items() if "model_conf" in job
+    }
+    
+    return {
+        "training": training_status,
+        "serving": serving_status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 # System Endpoints
 @app.get("/system/stats")
-@cache(expire=10)
+@cache(expire=5)
 async def get_system_stats():
     """Get system statistics including GPU usage"""
     try:
@@ -1542,7 +1828,7 @@ async def get_system_stats():
 
 
 @app.get("/system/metrics")
-@cache(expire=10)
+@cache(expire=3)
 async def get_system_metrics():
     """Get detailed system metrics for monitoring dashboard"""
     try:
@@ -1596,17 +1882,6 @@ async def get_system_metrics():
         logger.error(f"Error getting system metrics: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting system metrics: {str(e)}")
 
-
-# def calculate_cpu_percent(stats):
-#     """Calculate CPU percentage from Docker stats"""
-#     cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
-#     system_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
-    
-#     if system_delta > 0 and cpu_delta > 0:
-#         cpu_count = len(stats["cpu_stats"]["cpu_usage"]["percpu_usage"])
-#         return (cpu_delta / system_delta) * cpu_count * 100.0
-    
-#     return 0.0
 
 def calculate_cpu_percent(stats):
     """Calculate CPU percentage from Docker stats"""
@@ -1718,35 +1993,6 @@ async def get_gpu_stats_internal():
         logger.error(f"Error getting GPU stats: {str(e)}")
         return {"error": str(e)}
 
-
-# def get_disk_usage():
-#     """Get disk usage for important directories"""
-#     usage = {}
-    
-#     for name, path in [
-#         ("configs", CONFIG_DIR),
-#         ("datasets", DATASET_DIR),
-#         ("adapters", ADAPTER_DIR),
-#         ("logs", LOG_DIR),
-#         ("huggingface_cache", HF_CACHE_DIR)
-#     ]:
-#         try:
-#             total_size = 0
-#             for dirpath, _, filenames in os.walk(path):
-#                 for f in filenames:
-#                     fp = os.path.join(dirpath, f)
-#                     if os.path.exists(fp):
-#                         total_size += os.path.getsize(fp)
-            
-#             usage[name] = {
-#                 "size_bytes": total_size,
-#                 "size_human": format_size(total_size)
-#             }
-#         except Exception as e:
-#             logger.error(f"Error calculating size for {name}: {str(e)}")
-#             usage[name] = {"error": str(e)}
-    
-#     return usage
 
 def get_disk_usage():
     usage = {}
